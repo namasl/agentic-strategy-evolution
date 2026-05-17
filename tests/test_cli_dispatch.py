@@ -560,10 +560,30 @@ class TestCLIDispatcherRetry:
         assert mock_run.call_count == 3
         assert fast_sleep.call_count == 2
 
-    def test_timeout_does_not_retry(
+    def test_timeout_retries_then_succeeds(
         self, work_dir: Path, campaign: dict, fast_sleep,
     ) -> None:
-        """subprocess.TimeoutExpired is NOT retried — it means the session exceeded self.timeout."""
+        """subprocess.TimeoutExpired is treated as transient and retried."""
+        import subprocess
+        from orchestrator.cli_dispatch import CLIDispatcher
+
+        with patch(
+            "orchestrator.cli_dispatch.subprocess.run",
+            side_effect=[
+                subprocess.TimeoutExpired(cmd=["claude"], timeout=1800),
+                _success_result("# Design\nStub."),
+            ],
+        ) as mock_run:
+            d = CLIDispatcher(work_dir=work_dir, campaign=campaign)
+            d.dispatch("planner", "design", output_path=work_dir / "out.md", iteration=1)
+
+        assert mock_run.call_count == 2
+        fast_sleep.assert_called_once()
+
+    def test_timeout_exhausts_max_retries(
+        self, work_dir: Path, campaign: dict, fast_sleep,
+    ) -> None:
+        """Repeated timeouts exhaust max_retries and raise RuntimeError."""
         import subprocess
         from orchestrator.cli_dispatch import CLIDispatcher
 
@@ -571,12 +591,11 @@ class TestCLIDispatcherRetry:
             "orchestrator.cli_dispatch.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=1800),
         ) as mock_run:
-            d = CLIDispatcher(work_dir=work_dir, campaign=campaign)
-            with pytest.raises(RuntimeError, match="timed out"):
+            d = CLIDispatcher(work_dir=work_dir, campaign=campaign, max_retries=2)
+            with pytest.raises(RuntimeError, match="still failing after"):
                 d.dispatch("planner", "design", output_path=work_dir / "out.md", iteration=1)
 
-        assert mock_run.call_count == 1
-        fast_sleep.assert_not_called()
+        assert mock_run.call_count == 3  # 1 initial + 2 retries
 
     def test_file_not_found_does_not_retry(
         self, work_dir: Path, campaign: dict, fast_sleep,

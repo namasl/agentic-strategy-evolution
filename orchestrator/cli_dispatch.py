@@ -271,9 +271,16 @@ class CLIDispatcher(LLMDispatcher):
                 "claude CLI not found. Install Claude Code: "
                 "https://docs.anthropic.com/en/docs/claude-code"
             )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
+        except subprocess.TimeoutExpired as exc:
+            # Treat as transient — a timeout is often caused by an upstream
+            # authentication or network issue that may resolve on retry.
+            stderr_snippet = ""
+            if exc.stderr:
+                chunk = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode("utf-8", errors="replace")
+                stderr_snippet = chunk[-500:]
+            raise _TransientCLIError(
                 f"claude -p timed out after {self.timeout}s."
+                + (f" stderr: {stderr_snippet}" if stderr_snippet else "")
             )
 
         if result.returncode != 0:
