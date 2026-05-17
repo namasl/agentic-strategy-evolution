@@ -86,24 +86,30 @@ def _generate_report(campaign: dict, work_dir: Path, model: str | None) -> None:
 
 
 def _resume_completed_campaign(work_dir: Path, max_iterations: int) -> int:
-    """Decide whether to resume a DONE campaign and, if so, advance it.
+    """Decide where to resume a campaign and, if DONE, advance it.
 
-    Resumes (transitions state DONE -> DESIGN and returns the next iteration
-    number) only when all of:
-      * state.phase == "DONE"
-      * ledger.json exists and parses
-      * the ledger has at least one real iteration row (iteration >= 1)
-      * completed iterations < max_iterations
+    Returns the iteration number to start the campaign loop from:
+      * INIT (fresh):     1
+      * Mid-flight:       engine.iteration (resume in-progress iteration)
+      * DONE (finished):  completed + 1 after transitioning DONE -> DESIGN,
+                          provided completed < max_iterations; else 1
 
-    In every other case — fresh campaign, mid-flight campaign, empty/corrupt
-    ledger, or already at max_iterations — returns 1 and leaves state
-    untouched. A corrupt ledger is logged at warning level so the user can
-    repair it; it never raises.
+    A corrupt ledger is logged at warning level; it never raises.
     """
     from orchestrator.engine import Engine
 
     engine = Engine(work_dir)
-    if engine.phase != "DONE":
+
+    # Mid-flight: resume the in-progress iteration
+    if engine.phase not in ("INIT", "DONE"):
+        start = engine.iteration
+        print(
+            f"  Resuming mid-flight campaign at iteration {start} "
+            f"(phase={engine.phase}, max_iterations={max_iterations})"
+        )
+        return start
+
+    if engine.phase == "INIT":
         return 1
 
     ledger_path = work_dir / "ledger.json"

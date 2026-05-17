@@ -201,12 +201,42 @@ class TestResumeCompletedCampaign:
     when the caller raises max_iterations."""
 
     def test_fresh_campaign_returns_iteration_1(self, tmp_path):
-        """With phase != DONE, function is a no-op returning 1."""
+        """Phase INIT (fresh) returns 1, state untouched."""
         from run_campaign import _resume_completed_campaign
         work_dir = _setup_work_dir(tmp_path)
         # Default state.json phase is INIT
         assert _resume_completed_campaign(work_dir, max_iterations=5) == 1
         assert Engine(work_dir).phase == "INIT"  # untouched
+
+    def test_mid_flight_design_resumes_at_correct_iteration(self, tmp_path):
+        """Mid-flight DESIGN phase returns engine.iteration without touching state."""
+        from run_campaign import _resume_completed_campaign
+        work_dir = _setup_work_dir(tmp_path)
+        state = json.loads((work_dir / "state.json").read_text())
+        state["phase"] = "DESIGN"
+        state["iteration"] = 16
+        (work_dir / "state.json").write_text(json.dumps(state))
+
+        result = _resume_completed_campaign(work_dir, max_iterations=20)
+        assert result == 16
+        engine = Engine(work_dir)
+        assert engine.phase == "DESIGN"   # untouched
+        assert engine.iteration == 16
+
+    def test_mid_flight_execute_analyze_resumes_at_correct_iteration(self, tmp_path):
+        """Mid-flight EXECUTE_ANALYZE phase returns engine.iteration without touching state."""
+        from run_campaign import _resume_completed_campaign
+        work_dir = _setup_work_dir(tmp_path)
+        state = json.loads((work_dir / "state.json").read_text())
+        state["phase"] = "EXECUTE_ANALYZE"
+        state["iteration"] = 5
+        (work_dir / "state.json").write_text(json.dumps(state))
+
+        result = _resume_completed_campaign(work_dir, max_iterations=10)
+        assert result == 5
+        engine = Engine(work_dir)
+        assert engine.phase == "EXECUTE_ANALYZE"  # untouched
+        assert engine.iteration == 5
 
     def test_done_with_more_iterations_configured_resumes(self, tmp_path):
         """Phase DONE + ledger shows iter 1 + max_iterations=2 -> transition to
