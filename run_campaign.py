@@ -103,9 +103,22 @@ def _resume_completed_campaign(work_dir: Path, max_iterations: int) -> int:
     # Mid-flight: resume the in-progress iteration
     if engine.phase not in ("INIT", "DONE"):
         start = engine.iteration
-        print(
-            f"  Resuming mid-flight campaign at iteration {start} "
-            f"(phase={engine.phase}, max_iterations={max_iterations})"
+        if start < 1:
+            logger.warning(
+                "state.json has iteration=%d (< 1); starting fresh.", start,
+            )
+            return 1
+        if start > max_iterations:
+            logger.warning(
+                "Mid-flight iteration %d exceeds max_iterations=%d; "
+                "raise max_iterations to resume this campaign.",
+                start, max_iterations,
+            )
+            return start
+        logger.info(
+            "Resuming mid-flight campaign at iteration %d "
+            "(phase=%s, max_iterations=%d)",
+            start, engine.phase, max_iterations,
         )
         return start
 

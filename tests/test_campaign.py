@@ -238,6 +238,50 @@ class TestResumeCompletedCampaign:
         assert engine.phase == "EXECUTE_ANALYZE"  # untouched
         assert engine.iteration == 5
 
+    def test_mid_flight_iteration_1_boundary(self, tmp_path):
+        """Mid-flight at iteration=1 returns 1 (boundary where old and new code agree)."""
+        from run_campaign import _resume_completed_campaign
+        work_dir = _setup_work_dir(tmp_path)
+        state = json.loads((work_dir / "state.json").read_text())
+        state["phase"] = "DESIGN"
+        state["iteration"] = 1
+        (work_dir / "state.json").write_text(json.dumps(state))
+
+        result = _resume_completed_campaign(work_dir, max_iterations=5)
+        assert result == 1
+        engine = Engine(work_dir)
+        assert engine.phase == "DESIGN"  # untouched
+
+    def test_mid_flight_corrupt_iteration_falls_back_to_1(self, tmp_path, caplog):
+        """Mid-flight with iteration < 1 in state.json falls back to 1 with a warning."""
+        import logging
+        from run_campaign import _resume_completed_campaign
+        work_dir = _setup_work_dir(tmp_path)
+        state = json.loads((work_dir / "state.json").read_text())
+        state["phase"] = "DESIGN"
+        state["iteration"] = 0
+        (work_dir / "state.json").write_text(json.dumps(state))
+
+        with caplog.at_level(logging.WARNING):
+            result = _resume_completed_campaign(work_dir, max_iterations=5)
+        assert result == 1
+        assert any("iteration=0" in r.message for r in caplog.records)
+
+    def test_mid_flight_exceeds_max_iterations_warns(self, tmp_path, caplog):
+        """Mid-flight iteration > max_iterations logs a warning and returns start."""
+        import logging
+        from run_campaign import _resume_completed_campaign
+        work_dir = _setup_work_dir(tmp_path)
+        state = json.loads((work_dir / "state.json").read_text())
+        state["phase"] = "DESIGN"
+        state["iteration"] = 16
+        (work_dir / "state.json").write_text(json.dumps(state))
+
+        with caplog.at_level(logging.WARNING):
+            result = _resume_completed_campaign(work_dir, max_iterations=5)
+        assert result == 16
+        assert any("max_iterations" in r.message for r in caplog.records)
+
     def test_done_with_more_iterations_configured_resumes(self, tmp_path):
         """Phase DONE + ledger shows iter 1 + max_iterations=2 -> transition to
         DESIGN and return 2."""
