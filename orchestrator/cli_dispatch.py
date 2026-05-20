@@ -49,6 +49,10 @@ class _TransientCLIError(RuntimeError):
     """Raised internally by _call_claude_once when the failure is transient."""
 
 
+class _TransientTimeoutError(_TransientCLIError):
+    """Raised when claude -p times out; tracked separately for a tighter retry cap."""
+
+
 def _is_transient(response_json: dict | None, stderr: str = "") -> bool:
     """Return True if the claude -p failure looks like a transient transport error."""
     if response_json is not None:
@@ -94,6 +98,7 @@ class CLIDispatcher(LLMDispatcher):
         timeout: int = 1800,
         max_turns: int = 25,
         max_retries: int | None = 10,
+        max_timeout_retries: int = 2,
     ) -> None:
         super().__init__(
             work_dir=work_dir,
@@ -107,6 +112,7 @@ class CLIDispatcher(LLMDispatcher):
         self.timeout = timeout
         self.max_turns = max_turns
         self.max_retries = max_retries
+        self.max_timeout_retries = max_timeout_retries
         repo_path = campaign.get("target_system", {}).get("repo_path")
         self._cwd = Path(repo_path) if repo_path else None
 
@@ -234,9 +240,28 @@ class CLIDispatcher(LLMDispatcher):
         print(f"    Waiting for claude -p ({self.model}, max_turns={turns})...", flush=True)
 
         failure_count = 0
+        timeout_count = 0
         while True:
             try:
                 return self._call_claude_once(cmd, prompt, cwd)
+            except _TransientTimeoutError as exc:
+                timeout_count += 1
+                if timeout_count > self.max_timeout_retries:
+                    raise RuntimeError(
+                        f"claude -p timed out after {self.timeout}s "
+                        f"({timeout_count} time(s)); giving up."
+                    ) from exc
+                delay = _backoff_for(timeout_count)
+                logger.error(
+                    "claude -p timed out (attempt %d/%d) — retrying in %.0fs",
+                    timeout_count, self.max_timeout_retries, delay,
+                )
+                print(
+                    f"    claude -p timed out (attempt {timeout_count}/{self.max_timeout_retries}); "
+                    f"retrying in {delay:.0f}s...",
+                    flush=True,
+                )
+                time.sleep(delay)
             except _TransientCLIError as exc:
                 failure_count += 1
                 if self.max_retries is not None and failure_count > self.max_retries:
@@ -271,16 +296,9 @@ class CLIDispatcher(LLMDispatcher):
                 "claude CLI not found. Install Claude Code: "
                 "https://docs.anthropic.com/en/docs/claude-code"
             )
-        except subprocess.TimeoutExpired as exc:
-            # Treat as transient — a timeout is often caused by an upstream
-            # authentication or network issue that may resolve on retry.
-            stderr_snippet = ""
-            if exc.stderr:
-                chunk = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode("utf-8", errors="replace")
-                stderr_snippet = chunk[-500:]
-            raise _TransientCLIError(
+        except subprocess.TimeoutExpired:
+            raise _TransientTimeoutError(
                 f"claude -p timed out after {self.timeout}s."
-                + (f" stderr: {stderr_snippet}" if stderr_snippet else "")
             )
 
         if result.returncode != 0:

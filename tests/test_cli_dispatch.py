@@ -563,7 +563,7 @@ class TestCLIDispatcherRetry:
     def test_timeout_retries_then_succeeds(
         self, work_dir: Path, campaign: dict, fast_sleep,
     ) -> None:
-        """subprocess.TimeoutExpired is treated as transient and retried."""
+        """subprocess.TimeoutExpired is retried up to max_timeout_retries times."""
         import subprocess
         from orchestrator.cli_dispatch import CLIDispatcher
 
@@ -574,16 +574,16 @@ class TestCLIDispatcherRetry:
                 _success_result("# Design\nStub."),
             ],
         ) as mock_run:
-            d = CLIDispatcher(work_dir=work_dir, campaign=campaign)
+            d = CLIDispatcher(work_dir=work_dir, campaign=campaign, max_timeout_retries=2)
             d.dispatch("planner", "design", output_path=work_dir / "out.md", iteration=1)
 
         assert mock_run.call_count == 2
-        fast_sleep.assert_called_once()
+        fast_sleep.assert_called_once_with(5)  # _backoff_for(1) == 5s
 
-    def test_timeout_exhausts_max_retries(
+    def test_timeout_exhausts_max_timeout_retries(
         self, work_dir: Path, campaign: dict, fast_sleep,
     ) -> None:
-        """Repeated timeouts exhaust max_retries and raise RuntimeError."""
+        """Timeouts respect max_timeout_retries (independent of max_retries)."""
         import subprocess
         from orchestrator.cli_dispatch import CLIDispatcher
 
@@ -591,11 +591,38 @@ class TestCLIDispatcherRetry:
             "orchestrator.cli_dispatch.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=1800),
         ) as mock_run:
-            d = CLIDispatcher(work_dir=work_dir, campaign=campaign, max_retries=2)
-            with pytest.raises(RuntimeError, match="still failing after"):
+            d = CLIDispatcher(work_dir=work_dir, campaign=campaign, max_timeout_retries=2)
+            with pytest.raises(RuntimeError, match="timed out"):
                 d.dispatch("planner", "design", output_path=work_dir / "out.md", iteration=1)
 
         assert mock_run.call_count == 3  # 1 initial + 2 retries
+        assert fast_sleep.call_count == 2
+        assert fast_sleep.call_args_list[0][0][0] == 5   # _backoff_for(1)
+        assert fast_sleep.call_args_list[1][0][0] == 30  # _backoff_for(2)
+
+    def test_timeout_does_not_consume_max_retries_budget(
+        self, work_dir: Path, campaign: dict, fast_sleep,
+    ) -> None:
+        """Timeout retries are tracked separately — a timeout does not decrement
+        the transient-error (max_retries) budget."""
+        import subprocess
+        from orchestrator.cli_dispatch import CLIDispatcher
+
+        with patch(
+            "orchestrator.cli_dispatch.subprocess.run",
+            side_effect=[
+                subprocess.TimeoutExpired(cmd=["claude"], timeout=1800),
+                _transient_socket_result(),
+                _success_result("# Design\nStub."),
+            ],
+        ) as mock_run:
+            d = CLIDispatcher(
+                work_dir=work_dir, campaign=campaign,
+                max_timeout_retries=1, max_retries=1,
+            )
+            d.dispatch("planner", "design", output_path=work_dir / "out.md", iteration=1)
+
+        assert mock_run.call_count == 3
 
     def test_file_not_found_does_not_retry(
         self, work_dir: Path, campaign: dict, fast_sleep,
