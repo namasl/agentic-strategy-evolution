@@ -53,6 +53,9 @@ properties:
         type: ["string", "null"]
         minLength: 1
         description: "Path to target system git repo. Used by CLIDispatcher for code-access agents. If set, experiments run in isolated worktrees."
+      observational:
+        type: boolean
+        description: "If true, the executor runs directly in repo_path with no per-iteration git worktree. Use for live-system probing campaigns where there is no code to evolve. Bundles must contain no code_changes arms."
 
   models:
     type: object
