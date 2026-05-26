@@ -370,7 +370,10 @@ def run_iteration(
             cli_dispatcher.model = _model_for("execute_analyze")
             cli_dispatcher.max_turns = _max_turns_for("execute_analyze")
         exec_dispatcher = cli_dispatcher or llm_dispatcher
-        if repo_path:
+        observational = bool(
+            campaign.get("target_system", {}).get("observational", False)
+        )
+        if repo_path and not observational:
             from orchestrator.worktree import (
                 create_experiment_worktree,
                 remove_experiment_worktree,
@@ -380,6 +383,12 @@ def run_iteration(
             )
             (iter_dir / ".experiment_id").write_text(experiment_id)
             print(f"  Experiment worktree: {experiment_dir}")
+        elif repo_path:
+            # Observational mode: executor runs directly in repo_path. The
+            # target system is live (cluster, service, dataset) and there is
+            # nothing to isolate — bundles must contain no code_changes arms.
+            experiment_dir = Path(repo_path)
+            print(f"  Observational mode: executor runs in {experiment_dir}")
         if cli_dispatcher:
             import contextlib
             ctx = cli_dispatcher.override_cwd(experiment_dir) if experiment_dir else contextlib.nullcontext()

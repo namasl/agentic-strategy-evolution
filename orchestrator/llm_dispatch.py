@@ -35,6 +35,38 @@ _FENCE_RE = {
 # Schema cache: schema_name -> parsed schema dict
 _schema_cache: dict[str, dict] = {}
 
+# Prompt fragments that swap based on target_system.observational. Worktree
+# mode is the default — code-evolution campaigns get an isolated git worktree
+# per iteration. Observational mode is for live targets (clusters, services,
+# datasets) that the executor probes without per-iteration code mutation.
+_WORKTREE_EXECUTION_ENV = (
+    "You are running inside an isolated git worktree of the target system. "
+    "You own this worktree — reset it yourself with `git checkout -- .` "
+    "between conditions."
+)
+_OBSERVATIONAL_EXECUTION_ENV = (
+    "You are running directly in the target system's working directory. "
+    "There is no per-iteration git isolation: this campaign is observational, "
+    "and your bundle must contain no `code_changes` arms. Do not mutate the "
+    "target system's persistent state — your job is to probe, measure, and "
+    "report. Treat any files you create as scratch artifacts that belong "
+    "under `{{iter_dir}}/inputs/` or `{{iter_dir}}/results/`, not in the "
+    "target directory."
+)
+_WORKTREE_DESIGN_CONSTRAINT = (
+    "**Worktree isolation assumed.** The executor runs in a clean git "
+    "worktree. Each condition starts from clean state (`git checkout -- .` "
+    "runs between conditions). Design your experimental conditions assuming "
+    "this — don't include manual cleanup steps."
+)
+_OBSERVATIONAL_DESIGN_CONSTRAINT = (
+    "**Observational campaign.** The executor runs directly against a live "
+    "target system — no git worktree, no code-change arms. All arms must be "
+    "pure observations of system state (probes, metrics, log scrapes). Do "
+    "not include `code_changes` in any arm; do not assume mutation is "
+    "possible without explicit consent gates."
+)
+
 
 class LLMDispatcher:
     """Dispatch agent roles to an LLM and produce schema-conformant artifacts."""
@@ -107,6 +139,11 @@ class LLMDispatcher:
                         f"Campaign 'target_system.{field}' must be a list of strings. "
                         f"Got: {val!r}"
                     )
+        if "observational" in ts and not isinstance(ts["observational"], bool):
+            raise ValueError(
+                f"Campaign 'target_system.observational' must be a bool. "
+                f"Got: {ts['observational']!r}"
+            )
 
     # ------------------------------------------------------------------
     # Public interface (satisfies Dispatcher protocol)
@@ -212,6 +249,7 @@ class LLMDispatcher:
         perspective: str | None,
     ) -> dict[str, str]:
         ts = self.campaign["target_system"]
+        observational = bool(ts.get("observational", False))
         ctx: dict[str, str] = {
             "target_system": ts["name"],
             "system_description": ts["description"],
@@ -219,6 +257,8 @@ class LLMDispatcher:
             "controllable_knobs": ", ".join(ts["controllable_knobs"]) if ts.get("controllable_knobs") else "Not specified — planner should discover from code",
             "active_principles": self._format_principles(),
             "iteration": str(iteration),
+            "execution_environment": _OBSERVATIONAL_EXECUTION_ENV if observational else _WORKTREE_EXECUTION_ENV,
+            "worktree_constraint": _OBSERVATIONAL_DESIGN_CONSTRAINT if observational else _WORKTREE_DESIGN_CONSTRAINT,
         }
 
         if phase == "design":
