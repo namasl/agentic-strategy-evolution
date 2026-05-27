@@ -1,4 +1,4 @@
-"""Tests for observational mode — campaigns where the executor probes a live
+"""Tests for live-target mode — campaigns where the executor probes a running
 target system instead of evolving code in a git worktree.
 """
 import contextlib
@@ -15,8 +15,8 @@ from orchestrator.engine import Engine
 from orchestrator.iteration import IterationOutcome, run_iteration
 from orchestrator.llm_dispatch import (
     LLMDispatcher,
-    _OBSERVATIONAL_DESIGN_CONSTRAINT,
-    _OBSERVATIONAL_EXECUTION_ENV,
+    _LIVE_TARGET_DESIGN_CONSTRAINT,
+    _LIVE_TARGET_EXECUTION_ENV,
     _WORKTREE_DESIGN_CONSTRAINT,
     _WORKTREE_EXECUTION_ENV,
 )
@@ -44,15 +44,15 @@ TEMPLATES_DIR = (
 )
 
 
-def _campaign(observational: bool, repo_path: Path | None = None) -> dict:
+def _campaign(live_target: bool, repo_path: Path | None = None) -> dict:
     target = {
         "name": "TestSystem",
         "description": "A live target with no code to evolve.",
         "observable_metrics": ["latency_ms"],
         "controllable_knobs": ["config"],
     }
-    if observational:
-        target["observational"] = True
+    if live_target:
+        target["live_target"] = True
     if repo_path is not None:
         target["repo_path"] = str(repo_path)
     return {
@@ -71,24 +71,24 @@ def _campaign(observational: bool, repo_path: Path | None = None) -> dict:
 
 
 class TestCampaignValidation:
-    def test_observational_true_accepted(self, tmp_path):
-        campaign = _campaign(observational=True)
+    def test_live_target_true_accepted(self, tmp_path):
+        campaign = _campaign(live_target=True)
         # Must not raise.
         LLMDispatcher._validate_campaign(campaign)
 
-    def test_observational_false_accepted(self, tmp_path):
-        campaign = _campaign(observational=False)
+    def test_live_target_false_accepted(self, tmp_path):
+        campaign = _campaign(live_target=False)
         LLMDispatcher._validate_campaign(campaign)
 
-    def test_observational_omitted_accepted(self, tmp_path):
-        campaign = _campaign(observational=False)
-        assert "observational" not in campaign["target_system"]
+    def test_live_target_omitted_accepted(self, tmp_path):
+        campaign = _campaign(live_target=False)
+        assert "live_target" not in campaign["target_system"]
         LLMDispatcher._validate_campaign(campaign)
 
-    def test_observational_non_bool_rejected(self):
-        campaign = _campaign(observational=False)
-        campaign["target_system"]["observational"] = "yes"
-        with pytest.raises(ValueError, match="observational"):
+    def test_live_target_non_bool_rejected(self):
+        campaign = _campaign(live_target=False)
+        campaign["target_system"]["live_target"] = "yes"
+        with pytest.raises(ValueError, match="live_target"):
             LLMDispatcher._validate_campaign(campaign)
 
 
@@ -99,11 +99,11 @@ class TestCampaignValidation:
 
 class TestPromptFragmentSelection:
     """The execution_environment and worktree_constraint placeholders swap
-    based on target_system.observational. The prompt loader will substitute
+    based on target_system.live_target. The prompt loader will substitute
     them into the design and execute_analyze templates.
     """
 
-    def _dispatcher(self, tmp_path, observational: bool) -> LLMDispatcher:
+    def _dispatcher(self, tmp_path, live_target: bool) -> LLMDispatcher:
         # Seed the work_dir with the run_id only — no API key needed because
         # _build_context never calls the LLM.
         work_dir = tmp_path / "work"
@@ -111,40 +111,40 @@ class TestPromptFragmentSelection:
         (work_dir / "runs" / "iter-1").mkdir(parents=True)
         return LLMDispatcher(
             work_dir=work_dir,
-            campaign=_campaign(observational=observational),
+            campaign=_campaign(live_target=live_target),
             completion_fn=lambda **kw: None,
         )
 
     def test_default_is_worktree(self, tmp_path):
-        d = self._dispatcher(tmp_path, observational=False)
+        d = self._dispatcher(tmp_path, live_target=False)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
         assert ctx["execution_environment"] == _WORKTREE_EXECUTION_ENV
         assert ctx["worktree_constraint"] == _WORKTREE_DESIGN_CONSTRAINT
 
-    def test_observational_swaps_text(self, tmp_path):
-        d = self._dispatcher(tmp_path, observational=True)
+    def test_live_target_swaps_text(self, tmp_path):
+        d = self._dispatcher(tmp_path, live_target=True)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
-        # _OBSERVATIONAL_EXECUTION_ENV embeds {{iter_dir}}, so context-level
+        # _LIVE_TARGET_EXECUTION_ENV embeds {{iter_dir}}, so context-level
         # equality holds (substitution happens later, in the loader).
-        assert ctx["execution_environment"] == _OBSERVATIONAL_EXECUTION_ENV
-        assert ctx["worktree_constraint"] == _OBSERVATIONAL_DESIGN_CONSTRAINT
+        assert ctx["execution_environment"] == _LIVE_TARGET_EXECUTION_ENV
+        assert ctx["worktree_constraint"] == _LIVE_TARGET_DESIGN_CONSTRAINT
 
-    def test_design_template_renders_with_observational_constraint(self, tmp_path):
-        """End-to-end: the real design.md picks up the observational constraint
+    def test_design_template_renders_with_live_target_constraint(self, tmp_path):
+        """End-to-end: the real design.md picks up the live-target constraint
         and drops the worktree variant.
         """
-        d = self._dispatcher(tmp_path, observational=True)
+        d = self._dispatcher(tmp_path, live_target=True)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
         rendered = d.loader.load("design", ctx)
         assert _WORKTREE_DESIGN_CONSTRAINT not in rendered
-        assert _OBSERVATIONAL_DESIGN_CONSTRAINT in rendered
+        assert _LIVE_TARGET_DESIGN_CONSTRAINT in rendered
 
-    def test_execute_analyze_template_renders_with_observational_env(self, tmp_path):
-        """End-to-end: execute_analyze.md picks up the observational execution
-        environment. The {{iter_dir}} embedded in the observational text must
+    def test_execute_analyze_template_renders_with_live_target_env(self, tmp_path):
+        """End-to-end: execute_analyze.md picks up the live-target execution
+        environment. The {{iter_dir}} embedded in the live-target text must
         be substituted by the loader's sequential pass.
         """
-        d = self._dispatcher(tmp_path, observational=True)
+        d = self._dispatcher(tmp_path, live_target=True)
         # _build_context for execute-analyze needs a bundle.yaml and handoff.md
         bundle_path = d.work_dir / "runs" / "iter-1" / "bundle.yaml"
         bundle_path.write_text("metadata:\n  iteration: 1\n")
@@ -155,15 +155,15 @@ class TestPromptFragmentSelection:
         )
         rendered = d.loader.load("execute_analyze", ctx)
         assert _WORKTREE_EXECUTION_ENV not in rendered
-        # The observational fragment is rendered AFTER {{iter_dir}} substitution,
+        # The live-target fragment is rendered AFTER {{iter_dir}} substitution,
         # so we assert against the post-substitution version.
         iter_dir = str((d.work_dir / "runs" / "iter-1").resolve())
-        assert _OBSERVATIONAL_EXECUTION_ENV.replace("{{iter_dir}}", iter_dir) in rendered
+        assert _LIVE_TARGET_EXECUTION_ENV.replace("{{iter_dir}}", iter_dir) in rendered
         assert "{{iter_dir}}" not in rendered  # no leftover placeholders
 
 
 # ---------------------------------------------------------------------------
-# Iteration loop: observational mode skips worktree creation
+# Iteration loop: live-target mode skips worktree creation
 # ---------------------------------------------------------------------------
 
 
@@ -172,12 +172,12 @@ def _setup_iteration(
     monkeypatch,
     *,
     repo_path: Path,
-    observational: bool,
+    live_target: bool,
 ):
     """Prepare a work_dir + campaign for an iteration test. Stubs the LLM and
     CLI dispatchers and the human gate so run_iteration completes without an
-    API key. Use `observational=True` to test the live-target path,
-    `observational=False` to test the worktree path.
+    API key. Use `live_target=True` to test the live-target path,
+    `live_target=False` to test the worktree path.
     """
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -187,7 +187,7 @@ def _setup_iteration(
     state["run_id"] = "test"
     (work_dir / "state.json").write_text(json.dumps(state, indent=2))
 
-    campaign = _campaign(observational=observational, repo_path=repo_path)
+    campaign = _campaign(live_target=live_target, repo_path=repo_path)
 
     import orchestrator.iteration as ri
 
@@ -211,23 +211,23 @@ def _setup_iteration(
     return work_dir, campaign
 
 
-def _setup_observational_iteration(tmp_path: Path, monkeypatch, *, repo_path: Path):
-    """Back-compat shim — observational helper preserved for clarity at call sites."""
+def _setup_live_target_iteration(tmp_path: Path, monkeypatch, *, repo_path: Path):
+    """Convenience wrapper for the live-target path."""
     return _setup_iteration(
-        tmp_path, monkeypatch, repo_path=repo_path, observational=True,
+        tmp_path, monkeypatch, repo_path=repo_path, live_target=True,
     )
 
 
-class TestObservationalIterationFlow:
+class TestLiveTargetIterationFlow:
     def test_runs_without_git_repo(self, tmp_path, monkeypatch):
-        """A non-git repo_path + observational=true must not raise
+        """A non-git repo_path + live_target=true must not raise
         FileNotFoundError('Not a git repository') and must complete the
         iteration. This is the regression for the magic.yaml campaign.
         """
         repo = tmp_path / "live-target"
         repo.mkdir()  # NOT a git repo — no .git/ here.
 
-        work_dir, campaign = _setup_observational_iteration(
+        work_dir, campaign = _setup_live_target_iteration(
             tmp_path, monkeypatch, repo_path=repo,
         )
         result = run_iteration(campaign, work_dir, iteration=1)
@@ -237,7 +237,7 @@ class TestObservationalIterationFlow:
     def test_no_experiment_worktree_created(self, tmp_path, monkeypatch):
         repo = tmp_path / "live-target"
         repo.mkdir()
-        work_dir, campaign = _setup_observational_iteration(
+        work_dir, campaign = _setup_live_target_iteration(
             tmp_path, monkeypatch, repo_path=repo,
         )
 
@@ -250,7 +250,7 @@ class TestObservationalIterationFlow:
             called["n"] += 1
             raise AssertionError(
                 "create_experiment_worktree must not be called in "
-                "observational mode"
+                "live-target mode"
             )
 
         monkeypatch.setattr(
@@ -260,23 +260,23 @@ class TestObservationalIterationFlow:
         run_iteration(campaign, work_dir, iteration=1)
 
         assert called["n"] == 0
-        # No .experiment_id file should be written in observational mode.
+        # No .experiment_id file should be written in live-target mode.
         assert not (work_dir / "runs" / "iter-1" / ".experiment_id").exists()
         # No .nous-experiments/ directory should appear in the target.
         assert not (repo / ".nous-experiments").exists()
 
 
 class TestWorktreeIterationFlow:
-    """Regression: with observational=False (or omitted), repo_path must
+    """Regression: with live_target=False (or omitted), repo_path must
     still trigger create_experiment_worktree. Without this test, inverting
-    the gate at iteration.py would only break observational tests.
+    the gate at iteration.py would only break live-target tests.
     """
 
-    def test_worktree_created_when_not_observational(self, tmp_path, monkeypatch):
+    def test_worktree_created_when_not_live_target(self, tmp_path, monkeypatch):
         repo = tmp_path / "code-target"
         repo.mkdir()
         work_dir, campaign = _setup_iteration(
-            tmp_path, monkeypatch, repo_path=repo, observational=False,
+            tmp_path, monkeypatch, repo_path=repo, live_target=False,
         )
 
         create_calls: list[tuple] = []

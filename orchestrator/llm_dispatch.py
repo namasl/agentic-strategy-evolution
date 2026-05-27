@@ -35,23 +35,26 @@ _FENCE_RE = {
 # Schema cache: schema_name -> parsed schema dict
 _schema_cache: dict[str, dict] = {}
 
-# Prompt fragments that swap based on target_system.observational. Worktree
+# Prompt fragments that swap based on target_system.live_target. Worktree
 # mode is the default — code-evolution campaigns get an isolated git worktree
-# per iteration. Observational mode is for live targets (clusters, services,
+# per iteration. Live-target mode is for running systems (clusters, services,
 # datasets) that the executor probes without per-iteration code mutation.
+# (The flag is `live_target` rather than `observational` to avoid colliding
+# with the existing "observe mode" in execute_analyze.md, which means
+# "the bundle has no code_changes arms.")
 _WORKTREE_EXECUTION_ENV = (
     "You are running inside an isolated git worktree of the target system. "
     "You own this worktree — reset it yourself with `git checkout -- .` "
     "between conditions."
 )
-_OBSERVATIONAL_EXECUTION_ENV = (
-    "You are running directly in the target system's working directory. "
-    "There is no per-iteration git isolation: this campaign is observational, "
-    "and your bundle must contain no `code_changes` arms. Do not mutate the "
-    "target system's persistent state — your job is to probe, measure, and "
-    "report. Treat any files you create as scratch artifacts that belong "
-    "under `{{iter_dir}}/inputs/` or `{{iter_dir}}/results/`, not in the "
-    "target directory."
+_LIVE_TARGET_EXECUTION_ENV = (
+    "You are running directly against a live target system, in its working "
+    "directory. There is no per-iteration git isolation, and your bundle "
+    "must contain no `code_changes` arms. Do not mutate the target system's "
+    "persistent state — your job is to probe, measure, and report. Treat "
+    "any files you create as scratch artifacts that belong under "
+    "`{{iter_dir}}/inputs/` or `{{iter_dir}}/results/`, not in the target "
+    "directory."
 )
 _WORKTREE_DESIGN_CONSTRAINT = (
     "**Worktree isolation assumed.** The executor runs in a clean git "
@@ -59,19 +62,19 @@ _WORKTREE_DESIGN_CONSTRAINT = (
     "runs between conditions). Design your experimental conditions assuming "
     "this — don't include manual cleanup steps."
 )
-_OBSERVATIONAL_DESIGN_CONSTRAINT = (
-    "**Observational campaign.** The executor runs directly against a live "
-    "target system — no git worktree, no code-change arms. All arms must be "
-    "pure observations of system state (probes, metrics, log scrapes). Do "
-    "not include `code_changes` in any arm; do not assume mutation is "
-    "possible without explicit consent gates."
+_LIVE_TARGET_DESIGN_CONSTRAINT = (
+    "**Live target system.** The executor runs directly against a running "
+    "system — no git worktree, no code-change arms. All arms must be pure "
+    "observations of system state (probes, metrics, log scrapes). Do not "
+    "include `code_changes` in any arm; do not assume mutation is possible "
+    "without explicit consent gates."
 )
 
 # Per-condition reset step in execute_analyze.md Phase 2. Worktree mode resets
-# tracked files between conditions; observational mode has no checkout to
+# tracked files between conditions; live-target mode has no checkout to
 # revert and instead reminds the agent not to mutate the live target.
 _WORKTREE_CONDITION_RESET = "Reset worktree: `git checkout -- .`"
-_OBSERVATIONAL_CONDITION_RESET = (
+_LIVE_TARGET_CONDITION_RESET = (
     "Do not mutate the target system between conditions. Any files you "
     "wrote to the target directory during the previous condition must be "
     "removed before the next one runs (this is your responsibility — "
@@ -105,10 +108,10 @@ def validate_campaign(campaign: dict) -> None:
                     f"Campaign 'target_system.{field}' must be a list of strings. "
                     f"Got: {val!r}"
                 )
-    if "observational" in ts and not isinstance(ts["observational"], bool):
+    if "live_target" in ts and not isinstance(ts["live_target"], bool):
         raise ValueError(
-            f"Campaign 'target_system.observational' must be a bool. "
-            f"Got: {ts['observational']!r}"
+            f"Campaign 'target_system.live_target' must be a bool. "
+            f"Got: {ts['live_target']!r}"
         )
 
 
@@ -266,7 +269,7 @@ class LLMDispatcher:
         perspective: str | None,
     ) -> dict[str, str]:
         ts = self.campaign["target_system"]
-        observational = bool(ts.get("observational", False))
+        live_target = bool(ts.get("live_target", False))
         ctx: dict[str, str] = {
             "target_system": ts["name"],
             "system_description": ts["description"],
@@ -274,9 +277,9 @@ class LLMDispatcher:
             "controllable_knobs": ", ".join(ts["controllable_knobs"]) if ts.get("controllable_knobs") else "Not specified — planner should discover from code",
             "active_principles": self._format_principles(),
             "iteration": str(iteration),
-            "execution_environment": _OBSERVATIONAL_EXECUTION_ENV if observational else _WORKTREE_EXECUTION_ENV,
-            "worktree_constraint": _OBSERVATIONAL_DESIGN_CONSTRAINT if observational else _WORKTREE_DESIGN_CONSTRAINT,
-            "condition_reset": _OBSERVATIONAL_CONDITION_RESET if observational else _WORKTREE_CONDITION_RESET,
+            "execution_environment": _LIVE_TARGET_EXECUTION_ENV if live_target else _WORKTREE_EXECUTION_ENV,
+            "worktree_constraint": _LIVE_TARGET_DESIGN_CONSTRAINT if live_target else _WORKTREE_DESIGN_CONSTRAINT,
+            "condition_reset": _LIVE_TARGET_CONDITION_RESET if live_target else _WORKTREE_CONDITION_RESET,
         }
 
         if phase == "design":

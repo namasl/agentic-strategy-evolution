@@ -257,7 +257,7 @@ def run_iteration(
     """
     # Validate the campaign once, up front. The staticmethod on LLMDispatcher
     # is also called from its constructor, but inline-agent mode never builds
-    # an LLMDispatcher — without this call, a non-bool `observational` value
+    # an LLMDispatcher — without this call, a non-bool `live_target` value
     # would slip past validation and silently coerce via bool() below.
     from orchestrator.llm_dispatch import validate_campaign
     validate_campaign(campaign)
@@ -377,10 +377,10 @@ def run_iteration(
             cli_dispatcher.model = _model_for("execute_analyze")
             cli_dispatcher.max_turns = _max_turns_for("execute_analyze")
         exec_dispatcher = cli_dispatcher or llm_dispatcher
-        observational = bool(
-            campaign.get("target_system", {}).get("observational", False)
+        live_target = bool(
+            campaign.get("target_system", {}).get("live_target", False)
         )
-        if repo_path and not observational:
+        if repo_path and not live_target:
             from orchestrator.worktree import (
                 create_experiment_worktree,
                 remove_experiment_worktree,
@@ -391,11 +391,11 @@ def run_iteration(
             (iter_dir / ".experiment_id").write_text(experiment_id)
             print(f"  Experiment worktree: {experiment_dir}")
         elif repo_path:
-            # Observational mode: executor runs directly in repo_path. The
-            # target system is live (cluster, service, dataset) and there is
-            # nothing to isolate — bundles must contain no code_changes arms.
+            # Live-target mode: executor runs directly in repo_path. The
+            # target system is running (cluster, service, dataset) and there
+            # is nothing to isolate — bundles must contain no code_changes arms.
             experiment_dir = Path(repo_path)
-            print(f"  Observational mode: executor runs in {experiment_dir}")
+            print(f"  Live target: executor runs in {experiment_dir}")
         if cli_dispatcher:
             import contextlib
             ctx = cli_dispatcher.override_cwd(experiment_dir) if experiment_dir else contextlib.nullcontext()
