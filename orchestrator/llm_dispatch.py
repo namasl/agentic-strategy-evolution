@@ -67,6 +67,50 @@ _OBSERVATIONAL_DESIGN_CONSTRAINT = (
     "possible without explicit consent gates."
 )
 
+# Per-condition reset step in execute_analyze.md Phase 2. Worktree mode resets
+# tracked files between conditions; observational mode has no checkout to
+# revert and instead reminds the agent not to mutate the live target.
+_WORKTREE_CONDITION_RESET = "Reset worktree: `git checkout -- .`"
+_OBSERVATIONAL_CONDITION_RESET = (
+    "Do not mutate the target system between conditions. Any files you "
+    "wrote to the target directory during the previous condition must be "
+    "removed before the next one runs (this is your responsibility — "
+    "there is no automatic checkout)."
+)
+
+
+def validate_campaign(campaign: dict) -> None:
+    """Validate campaign config. Module-level so it can be called before any
+    dispatcher is constructed (e.g., from `run_iteration` in inline-agent mode,
+    where no LLMDispatcher is built and the staticmethod path is never taken).
+    """
+    ts = campaign.get("target_system")
+    if not isinstance(ts, dict):
+        raise ValueError(
+            "Campaign config missing 'target_system' section. "
+            "See examples/campaign.yaml for the expected format."
+        )
+    required = ["name", "description"]
+    missing = [k for k in required if k not in ts]
+    if missing:
+        raise ValueError(
+            f"Campaign 'target_system' missing required keys: {missing}. "
+            f"See examples/campaign.yaml for the expected format."
+        )
+    for field in ("observable_metrics", "controllable_knobs"):
+        val = ts.get(field)
+        if val is not None:
+            if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+                raise ValueError(
+                    f"Campaign 'target_system.{field}' must be a list of strings. "
+                    f"Got: {val!r}"
+                )
+    if "observational" in ts and not isinstance(ts["observational"], bool):
+        raise ValueError(
+            f"Campaign 'target_system.observational' must be a bool. "
+            f"Got: {ts['observational']!r}"
+        )
+
 
 class LLMDispatcher:
     """Dispatch agent roles to an LLM and produce schema-conformant artifacts."""
@@ -82,7 +126,7 @@ class LLMDispatcher:
         completion_fn: Callable | None = None,
     ) -> None:
         self.work_dir = Path(work_dir)
-        self._validate_campaign(campaign)
+        validate_campaign(campaign)
         self.campaign = campaign
         self.model = model
         self.loader = PromptLoader(
@@ -116,34 +160,7 @@ class LLMDispatcher:
                 dal,
             )
 
-    @staticmethod
-    def _validate_campaign(campaign: dict) -> None:
-        ts = campaign.get("target_system")
-        if not isinstance(ts, dict):
-            raise ValueError(
-                "Campaign config missing 'target_system' section. "
-                "See examples/campaign.yaml for the expected format."
-            )
-        required = ["name", "description"]
-        missing = [k for k in required if k not in ts]
-        if missing:
-            raise ValueError(
-                f"Campaign 'target_system' missing required keys: {missing}. "
-                f"See examples/campaign.yaml for the expected format."
-            )
-        for field in ("observable_metrics", "controllable_knobs"):
-            val = ts.get(field)
-            if val is not None:
-                if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
-                    raise ValueError(
-                        f"Campaign 'target_system.{field}' must be a list of strings. "
-                        f"Got: {val!r}"
-                    )
-        if "observational" in ts and not isinstance(ts["observational"], bool):
-            raise ValueError(
-                f"Campaign 'target_system.observational' must be a bool. "
-                f"Got: {ts['observational']!r}"
-            )
+    _validate_campaign = staticmethod(validate_campaign)
 
     # ------------------------------------------------------------------
     # Public interface (satisfies Dispatcher protocol)
@@ -259,6 +276,7 @@ class LLMDispatcher:
             "iteration": str(iteration),
             "execution_environment": _OBSERVATIONAL_EXECUTION_ENV if observational else _WORKTREE_EXECUTION_ENV,
             "worktree_constraint": _OBSERVATIONAL_DESIGN_CONSTRAINT if observational else _WORKTREE_DESIGN_CONSTRAINT,
+            "condition_reset": _OBSERVATIONAL_CONDITION_RESET if observational else _WORKTREE_CONDITION_RESET,
         }
 
         if phase == "design":

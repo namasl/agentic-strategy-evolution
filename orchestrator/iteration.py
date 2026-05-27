@@ -255,6 +255,13 @@ def run_iteration(
     Returns:
         An IterationOutcome value: COMPLETED, CONTINUE, ABORTED, or REDESIGN.
     """
+    # Validate the campaign once, up front. The staticmethod on LLMDispatcher
+    # is also called from its constructor, but inline-agent mode never builds
+    # an LLMDispatcher — without this call, a non-bool `observational` value
+    # would slip past validation and silently coerce via bool() below.
+    from orchestrator.llm_dispatch import validate_campaign
+    validate_campaign(campaign)
+
     engine = Engine(work_dir)
     repo_path = campaign.get("target_system", {}).get("repo_path")
 

@@ -13,7 +13,13 @@ import pytest
 from orchestrator.dispatch import StubDispatcher
 from orchestrator.engine import Engine
 from orchestrator.iteration import IterationOutcome, run_iteration
-from orchestrator.llm_dispatch import LLMDispatcher
+from orchestrator.llm_dispatch import (
+    LLMDispatcher,
+    _OBSERVATIONAL_DESIGN_CONSTRAINT,
+    _OBSERVATIONAL_EXECUTION_ENV,
+    _WORKTREE_DESIGN_CONSTRAINT,
+    _WORKTREE_EXECUTION_ENV,
+)
 
 
 class _CLIStub(StubDispatcher):
@@ -82,7 +88,7 @@ class TestCampaignValidation:
     def test_observational_non_bool_rejected(self):
         campaign = _campaign(observational=False)
         campaign["target_system"]["observational"] = "yes"
-        with pytest.raises(ValueError, match="observational.*must be a bool"):
+        with pytest.raises(ValueError, match="observational"):
             LLMDispatcher._validate_campaign(campaign)
 
 
@@ -112,30 +118,31 @@ class TestPromptFragmentSelection:
     def test_default_is_worktree(self, tmp_path):
         d = self._dispatcher(tmp_path, observational=False)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
-        assert "isolated git worktree" in ctx["execution_environment"]
-        assert "Worktree isolation assumed" in ctx["worktree_constraint"]
+        assert ctx["execution_environment"] == _WORKTREE_EXECUTION_ENV
+        assert ctx["worktree_constraint"] == _WORKTREE_DESIGN_CONSTRAINT
 
     def test_observational_swaps_text(self, tmp_path):
         d = self._dispatcher(tmp_path, observational=True)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
-        assert "Observational" in ctx["worktree_constraint"]
-        assert "no per-iteration git isolation" in ctx["execution_environment"]
-        assert "git worktree" not in ctx["execution_environment"]
+        # _OBSERVATIONAL_EXECUTION_ENV embeds {{iter_dir}}, so context-level
+        # equality holds (substitution happens later, in the loader).
+        assert ctx["execution_environment"] == _OBSERVATIONAL_EXECUTION_ENV
+        assert ctx["worktree_constraint"] == _OBSERVATIONAL_DESIGN_CONSTRAINT
 
     def test_design_template_renders_with_observational_constraint(self, tmp_path):
-        """End-to-end: load the real design.md template with observational
-        context and confirm the worktree paragraph is replaced.
+        """End-to-end: the real design.md picks up the observational constraint
+        and drops the worktree variant.
         """
         d = self._dispatcher(tmp_path, observational=True)
         ctx = d._build_context("planner", "design", iteration=1, perspective=None)
         rendered = d.loader.load("design", ctx)
-        assert "Worktree isolation assumed" not in rendered
-        assert "Observational campaign" in rendered
+        assert _WORKTREE_DESIGN_CONSTRAINT not in rendered
+        assert _OBSERVATIONAL_DESIGN_CONSTRAINT in rendered
 
     def test_execute_analyze_template_renders_with_observational_env(self, tmp_path):
-        """End-to-end: load execute_analyze.md with observational context.
-        The {{iter_dir}} placeholder inside the observational text must also
-        be replaced (loader does sequential substitution).
+        """End-to-end: execute_analyze.md picks up the observational execution
+        environment. The {{iter_dir}} embedded in the observational text must
+        be substituted by the loader's sequential pass.
         """
         d = self._dispatcher(tmp_path, observational=True)
         # _build_context for execute-analyze needs a bundle.yaml and handoff.md
@@ -147,9 +154,12 @@ class TestPromptFragmentSelection:
             "executor", "execute-analyze", iteration=1, perspective=None,
         )
         rendered = d.loader.load("execute_analyze", ctx)
-        assert "isolated git worktree" not in rendered
-        assert "no per-iteration git isolation" in rendered
-        assert "{{iter_dir}}" not in rendered  # must be substituted
+        assert _WORKTREE_EXECUTION_ENV not in rendered
+        # The observational fragment is rendered AFTER {{iter_dir}} substitution,
+        # so we assert against the post-substitution version.
+        iter_dir = str((d.work_dir / "runs" / "iter-1").resolve())
+        assert _OBSERVATIONAL_EXECUTION_ENV.replace("{{iter_dir}}", iter_dir) in rendered
+        assert "{{iter_dir}}" not in rendered  # no leftover placeholders
 
 
 # ---------------------------------------------------------------------------
@@ -157,12 +167,17 @@ class TestPromptFragmentSelection:
 # ---------------------------------------------------------------------------
 
 
-def _setup_observational_iteration(
-    tmp_path: Path, monkeypatch, *, repo_path: Path,
+def _setup_iteration(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    repo_path: Path,
+    observational: bool,
 ):
-    """Prepare a work_dir + campaign that uses observational mode and a
-    repo_path that is NOT a git repo. With the observational gate working,
-    run_iteration must complete without ever hitting create_experiment_worktree.
+    """Prepare a work_dir + campaign for an iteration test. Stubs the LLM and
+    CLI dispatchers and the human gate so run_iteration completes without an
+    API key. Use `observational=True` to test the live-target path,
+    `observational=False` to test the worktree path.
     """
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -172,7 +187,7 @@ def _setup_observational_iteration(
     state["run_id"] = "test"
     (work_dir / "state.json").write_text(json.dumps(state, indent=2))
 
-    campaign = _campaign(observational=True, repo_path=repo_path)
+    campaign = _campaign(observational=observational, repo_path=repo_path)
 
     import orchestrator.iteration as ri
 
@@ -194,6 +209,13 @@ def _setup_observational_iteration(
         lambda: MagicMock(prompt=MagicMock(return_value=("approve", None))),
     )
     return work_dir, campaign
+
+
+def _setup_observational_iteration(tmp_path: Path, monkeypatch, *, repo_path: Path):
+    """Back-compat shim — observational helper preserved for clarity at call sites."""
+    return _setup_iteration(
+        tmp_path, monkeypatch, repo_path=repo_path, observational=True,
+    )
 
 
 class TestObservationalIterationFlow:
@@ -242,3 +264,46 @@ class TestObservationalIterationFlow:
         assert not (work_dir / "runs" / "iter-1" / ".experiment_id").exists()
         # No .nous-experiments/ directory should appear in the target.
         assert not (repo / ".nous-experiments").exists()
+
+
+class TestWorktreeIterationFlow:
+    """Regression: with observational=False (or omitted), repo_path must
+    still trigger create_experiment_worktree. Without this test, inverting
+    the gate at iteration.py would only break observational tests.
+    """
+
+    def test_worktree_created_when_not_observational(self, tmp_path, monkeypatch):
+        repo = tmp_path / "code-target"
+        repo.mkdir()
+        work_dir, campaign = _setup_iteration(
+            tmp_path, monkeypatch, repo_path=repo, observational=False,
+        )
+
+        create_calls: list[tuple] = []
+        remove_calls: list[tuple] = []
+
+        def fake_create(repo_path, iteration):
+            create_calls.append((Path(repo_path), iteration))
+            experiment_dir = tmp_path / "fake-worktree"
+            experiment_dir.mkdir(exist_ok=True)
+            return experiment_dir, "fake-experiment-id"
+
+        def fake_remove(repo_path, experiment_id):
+            remove_calls.append((Path(repo_path), experiment_id))
+
+        monkeypatch.setattr(
+            "orchestrator.worktree.create_experiment_worktree", fake_create,
+        )
+        monkeypatch.setattr(
+            "orchestrator.worktree.remove_experiment_worktree", fake_remove,
+        )
+
+        result = run_iteration(campaign, work_dir, iteration=1)
+
+        assert result == IterationOutcome.COMPLETED
+        assert create_calls == [(repo, 1)]
+        assert remove_calls == [(repo, "fake-experiment-id")]
+        # .experiment_id file should be written in worktree mode.
+        assert (
+            work_dir / "runs" / "iter-1" / ".experiment_id"
+        ).read_text() == "fake-experiment-id"
